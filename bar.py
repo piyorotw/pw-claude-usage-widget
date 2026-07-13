@@ -286,9 +286,17 @@ class Bar(QWidget):
         r = self.rect().adjusted(0, 0, -1, -1)
         H = r.height()
 
-        radius = max(10, int(H * 0.16))
+        # a transparent strip is left at the very top so the close (X) button can
+        # FLOAT above the card's top-right corner (like the reference). The card
+        # itself starts below that strip and holds all the content.
+        bs = int(H * CLOSE_STRIP)
+        ctop = r.top() + bs
+        ch = H - bs
+        card = QRectF(r.left(), ctop, r.width(), ch)
+
+        radius = max(10, int(ch * 0.16))
         path = QPainterPath()
-        path.addRoundedRect(QRectF(r), radius, radius)
+        path.addRoundedRect(card, radius, radius)
         p.fillPath(path, BG)
 
         d = (self._data or {}).get("claude")
@@ -296,15 +304,11 @@ class Bar(QWidget):
         rows = (d or {}).get("rows") or []
         if not rows:
             msg = "loading…" if not self._data else (d.get("error") if d else "no data")
-            self._text(p, QRectF(r.left() + 12, r.top(), r.width() - 24, H),
-                       msg or "no data", MUTED, max(9, int(H * 0.16)))
+            self._text(p, QRectF(card.left() + 12, card.top(), card.width() - 24, ch),
+                       msg or "no data", MUTED, max(9, int(ch * 0.16)))
+            self._draw_close_button_floating(p, r, bs)
             p.end()
             return
-
-        # top strip is reserved for the close button; content lives below it
-        bs = int(H * CLOSE_STRIP)
-        ctop = r.top() + bs
-        ch = H - bs
 
         pad = max(6, int(ch * 0.09))
         # logo (rounded square, smaller than card height, vertically centred)
@@ -332,13 +336,16 @@ class Bar(QWidget):
             ry = ctop + pad_v + i * row_h
             self._draw_row(p, rows_x, ry, rows_w, row_h, row, now)
 
-        # close (X) button in the top-right corner
-        bsz = int(bs * 1.02)
-        brect = QRectF(r.right() - bsz - int(H * 0.03), r.top() + int(H * 0.015),
-                       bsz, bsz)
-        self._close_rect = brect.toRect()
-        self._draw_close_button(p, brect)
+        self._draw_close_button_floating(p, r, bs)
         p.end()
+
+    def _draw_close_button_floating(self, p, r, bs):
+        """Red X floating above the card's top-right corner (mostly in the
+        transparent top strip, slightly overlapping the corner)."""
+        bsz = int(bs * 1.2)
+        rect = QRectF(r.right() - bsz - int(bs * 0.15), r.top(), bsz, bsz)
+        self._close_rect = rect.toRect()
+        self._draw_close_button(p, rect)
 
     def _draw_close_button(self, p, rect):
         p.setPen(Qt.NoPen)
