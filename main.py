@@ -20,7 +20,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 
 import usage
-from bar import Bar, log
+from bar import Bar, log, CLOSE_STRIP
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
@@ -94,7 +94,8 @@ def bar_geometry(screen, mon: dict, is_primary: bool = True):
     base_w = int(mon.get("width", 360))
     base_h = int(mon.get("height", 110))
     w = max(1, int(base_w * scale))
-    h = max(1, int(base_h * scale))
+    # add the close-button strip on top so the card keeps its configured size
+    h = max(1, int(base_h * scale / (1 - CLOSE_STRIP)))
     # real_taskbar_top only knows the PRIMARY taskbar (Shell_TrayWnd); for other
     # monitors fall back to the work-area edge minus the usual ~24px the taskbar
     # window overhangs. Fine-tune per-monitor with y_offset.
@@ -177,8 +178,22 @@ def main() -> int:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def make_close(target):
+        def _close():
+            log("close button (this monitor)")
+            target.mark_closed()
+            # if every monitor's widget is now closed, quit the whole app cleanly
+            if all(b._closed for b, _ in bars):
+                try:
+                    (HERE / ".stop").write_text("", encoding="utf-8")  # stop watchdog
+                except OSError:
+                    pass
+                app.quit()
+        return _close
+
     for bar, _ in bars:
         bar._on_logo = manual_refresh
+        bar._on_close = make_close(bar)
 
     def tick():
         try:

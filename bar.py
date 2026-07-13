@@ -13,8 +13,8 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
-from PySide6.QtGui import (QColor, QFont, QPainter, QPainterPath, QPen, QPixmap,
-                           QPolygonF)
+from PySide6.QtGui import (QColor, QFont, QLinearGradient, QPainter, QPainterPath,
+                           QPen, QPixmap, QPolygonF)
 from PySide6.QtWidgets import QWidget
 
 HERE = Path(__file__).resolve().parent
@@ -41,6 +41,12 @@ PLACEHOLDER = QColor(70, 70, 72)   # "—" for rows with no data yet
 GREEN = QColor(120, 226, 47)
 AMBER = QColor(247, 224, 30)
 RED = QColor(240, 45, 45)
+CLOSE_RED_TOP = QColor(255, 95, 85)
+CLOSE_RED_BOT = QColor(205, 30, 30)
+
+# Fraction of the window height reserved at the top for the close (X) button.
+# main.py adds this on top of the configured height so the card keeps its size.
+CLOSE_STRIP = 0.16
 
 # ---- Windows constants ---------------------------------------------------
 GWL_EXSTYLE = -20
@@ -120,6 +126,9 @@ class Bar(QWidget):
         self._logo_rect = None       # hit-box for the clickable logo (widget coords)
         self._on_logo = None         # callback set by main.py for a manual refresh
         self._updating = False
+        self._close_rect = None      # hit-box for the close (X) button
+        self._on_close = None        # callback set by main.py (close this monitor)
+        self._closed = False         # True once the user clicked X on this widget
 
     # -- data ---------------------------------------------------------------
     def update_data(self, data: dict):
@@ -131,15 +140,26 @@ class Bar(QWidget):
         self._updating = flag
         self.update()
 
+    def mark_closed(self):
+        """Dismiss just this monitor's widget (until the app is next launched).
+        Self-heal / reassert skip it afterwards so it isn't resurrected."""
+        self._closed = True
+        self.hide()
+
     # -- manual refresh on logo click --------------------------------------
     def mousePressEvent(self, ev):
-        if (self._logo_rect and self._on_logo and not self._updating
-                and self._logo_rect.contains(ev.position().toPoint())):
+        pt = ev.position().toPoint()
+        if self._close_rect and self._on_close and self._close_rect.contains(pt):
+            self._on_close()
+        elif (self._logo_rect and self._on_logo and not self._updating
+                and self._logo_rect.contains(pt)):
             self._on_logo()
         super().mousePressEvent(ev)
 
     def set_placement(self, geometry, config: dict):
         """Live-reposition/reconfigure (used by config hot-reload)."""
+        if self._closed:
+            return
         self._cfg = config
         self._geometry = geometry
         self.setGeometry(*geometry)
@@ -151,12 +171,14 @@ class Bar(QWidget):
         # The Win11 shell (Search/Start flyouts) can hide or even destroy
         # unowned topmost overlays. Whenever we get hidden from outside,
         # resurrect shortly after without stealing focus.
-        log(f"hideEvent spontaneous={ev.spontaneous()}")
         super().hideEvent(ev)
-        QTimer.singleShot(300, self.ensure_visible)
+        if not self._closed:      # but not when the user closed it on purpose
+            QTimer.singleShot(300, self.ensure_visible)
 
     def ensure_visible(self):
         """Bring the strip back if anything hid it or wiped its native styles."""
+        if self._closed:
+            return
         if not self.isVisible():
             log("resurrect: show()")
             self.setGeometry(*self._geometry)
@@ -248,7 +270,7 @@ class Bar(QWidget):
         """Keep the widget on top. Re-orders only when something actually covers it
         (taskbar, Claude Code, any window) — no needless z-order churn otherwise.
         Coordinates are never touched, so Qt keeps its own DPI-correct placement."""
-        if sys.platform != "win32":
+        if sys.platform != "win32" or self._closed:
             return
         try:
             if self._is_covered():
@@ -279,13 +301,18 @@ class Bar(QWidget):
             p.end()
             return
 
-        pad = max(6, int(H * 0.09))
-        # logo (rounded square, smaller than full height, vertically centred)
+        # top strip is reserved for the close button; content lives below it
+        bs = int(H * CLOSE_STRIP)
+        ctop = r.top() + bs
+        ch = H - bs
+
+        pad = max(6, int(ch * 0.09))
+        # logo (rounded square, smaller than card height, vertically centred)
         rows_x = r.left() + pad
         if self._logo and not self._logo.isNull():
-            sz = int(H * 0.70)                       # smaller than the card height
-            lm = int(H * 0.10)                       # left margin
-            lr = QRectF(r.left() + lm, r.top() + (H - sz) / 2, sz, sz)
+            sz = int(ch * 0.78)
+            lm = int(ch * 0.12)
+            lr = QRectF(r.left() + lm, ctop + (ch - sz) / 2, sz, sz)
             self._logo_rect = lr.toRect()
             clip = QPainterPath()
             clip.addRoundedRect(lr, sz * 0.28, sz * 0.28)
@@ -295,16 +322,37 @@ class Bar(QWidget):
             if self._updating:      # dim the logo while a manual refresh runs
                 p.fillRect(lr, QColor(0, 0, 0, 120))
             p.restore()
-            rows_x = int(lr.right() + H * 0.11)
+            rows_x = int(lr.right() + ch * 0.11)
 
         rows_w = r.right() - pad - rows_x
         n = len(rows)
-        pad_v = int(H * 0.09)
-        row_h = (H - 2 * pad_v) / n
+        pad_v = int(ch * 0.06)
+        row_h = (ch - 2 * pad_v) / n
         for i, row in enumerate(rows):
-            ry = r.top() + pad_v + i * row_h
+            ry = ctop + pad_v + i * row_h
             self._draw_row(p, rows_x, ry, rows_w, row_h, row, now)
+
+        # close (X) button in the top-right corner
+        bsz = int(bs * 1.02)
+        brect = QRectF(r.right() - bsz - int(H * 0.03), r.top() + int(H * 0.015),
+                       bsz, bsz)
+        self._close_rect = brect.toRect()
+        self._draw_close_button(p, brect)
         p.end()
+
+    def _draw_close_button(self, p, rect):
+        p.setPen(Qt.NoPen)
+        grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        grad.setColorAt(0.0, CLOSE_RED_TOP)
+        grad.setColorAt(1.0, CLOSE_RED_BOT)
+        p.setBrush(grad)
+        p.drawRoundedRect(rect, rect.width() * 0.26, rect.width() * 0.26)
+        pen = QPen(QColor(255, 255, 255), max(2.0, rect.width() * 0.13))
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        m = rect.width() * 0.32
+        p.drawLine(rect.left() + m, rect.top() + m, rect.right() - m, rect.bottom() - m)
+        p.drawLine(rect.right() - m, rect.top() + m, rect.left() + m, rect.bottom() - m)
 
     def _draw_row(self, p, x, y, w, h, row, now):
         placeholder = row.get("placeholder") or row.get("pct") is None
