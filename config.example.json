@@ -1,0 +1,16 @@
+{
+  "refresh_seconds": 30,
+  "click_through": false,
+  "use_api": true,
+  "claude_ceilings": { "5h": 8000000, "wk": 50000000 },
+  "monitors": [
+    {
+      "screen_index": 0,
+      "x": 900,
+      "width": 360,
+      "height": 110,
+      "scale": 1.0,
+      "y_offset": 0
+    }
+  ]
+}

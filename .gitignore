@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+
+# virtualenv
+.venv/
+venv/
+
+# runtime / local state
+*.log
+.stop
+.usage_cache.json
+
+# your personal config (positions for YOUR screens) — copy config.example.json
+config.json
+
+# personal / reference material — not for sharing
+Screenshot*.png
+S__*.jpg
+S__*.jpeg
+ExCCStatus.png
+GithubLink.md
+
+# never commit credentials
+.credentials.json*
+*credentials*.json
