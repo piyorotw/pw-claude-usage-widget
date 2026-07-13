@@ -8,6 +8,7 @@ from __future__ import annotations
 import ctypes
 import sys
 import time
+from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 
@@ -57,7 +58,19 @@ SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
 SW_SHOWNOACTIVATE = 4
 GW_HWNDPREV = 3
-TASKBAR_CLASSES = ("Shell_TrayWnd", "Shell_SecondaryTrayWnd")
+
+# The z-order walk reads window HANDLES back from the API. Without restype=HWND,
+# ctypes returns them as 32-bit ints and truncates/sign-flips them on 64-bit
+# Windows, so the walk followed the wrong window and never saw the covering app.
+# (Only the read helpers need this; SetWindowPos below works with plain ints.)
+if sys.platform == "win32":
+    _u32 = ctypes.windll.user32
+    _u32.GetWindow.restype = wintypes.HWND
+    _u32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    _u32.GetWindowRect.restype = wintypes.BOOL
+    _u32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    _u32.IsWindowVisible.restype = wintypes.BOOL
+    _u32.IsWindowVisible.argtypes = [wintypes.HWND]
 
 
 def _meter_color(pct: float) -> QColor:
@@ -180,16 +193,26 @@ class Bar(QWidget):
         )
         self._force_top()   # unconditionally rise above the taskbar on (re)start
 
-    def _is_below_taskbar(self) -> bool:
-        """True if a taskbar window sits above us in the z-order (i.e. covers us)."""
+    def _is_covered(self) -> bool:
+        """True if ANY visible window sits above us in z-order and overlaps our
+        rect — the taskbar, or a maximised app like Claude Code that stole the top
+        spot even though we hold WS_EX_TOPMOST. We only re-top when this is true, so
+        there is no needless z-order churn when nothing is on top of us."""
         user32 = ctypes.windll.user32
-        h = user32.GetWindow(int(self.winId()), GW_HWNDPREV)  # windows above us
-        buf = ctypes.create_unicode_buffer(64)
+        me = int(self.winId())
+        mine = wintypes.RECT()
+        if not user32.GetWindowRect(me, ctypes.byref(mine)):
+            return False
+        h = user32.GetWindow(me, GW_HWNDPREV)   # first window ABOVE us in z-order
         depth = 0
-        while h and depth < 600:
-            user32.GetClassNameW(h, buf, 64)
-            if buf.value in TASKBAR_CLASSES:
-                return True
+        while h and depth < 500:
+            if user32.IsWindowVisible(h):
+                o = wintypes.RECT()
+                user32.GetWindowRect(h, ctypes.byref(o))
+                if o.left > -30000 and o.top > -30000:   # skip minimised sentinels
+                    if not (o.right <= mine.left or o.left >= mine.right
+                            or o.bottom <= mine.top or o.top >= mine.bottom):
+                        return True
             h = user32.GetWindow(h, GW_HWNDPREV)
             depth += 1
         return False
@@ -197,25 +220,38 @@ class Bar(QWidget):
     def _force_top(self):
         """Re-insert at the very top of the topmost band.
 
-        A plain SetWindowPos(HWND_TOPMOST) is a *no-op* when the window is already
-        topmost, so it never rises back above the (also-topmost) Win11 taskbar.
-        Toggling NOTOPMOST -> TOPMOST forces a real re-order.
+        A background window (WS_EX_NOACTIVATE) can't normally push itself above the
+        *foreground* window's z-order, so a plain SetWindowPos(HWND_TOPMOST) silently
+        does nothing when e.g. a maximised Claude Code is focused. Briefly attaching
+        our thread's input to the foreground thread grants the permission; the
+        NOTOPMOST->TOPMOST toggle then actually re-orders us to the top.
         """
         user32 = ctypes.windll.user32
         hwnd = int(self.winId())
-        f = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
-        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, f)
-        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, f | SWP_SHOWWINDOW)
-        user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+        fg = user32.GetForegroundWindow()
+        my_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+        fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        attached = False
+        if fg_tid and fg_tid != my_tid:
+            attached = bool(user32.AttachThreadInput(my_tid, fg_tid, True))
+        try:
+            f = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+            user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, f)
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, f | SWP_SHOWWINDOW)
+            user32.BringWindowToTop(hwnd)
+            user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+        finally:
+            if attached:
+                user32.AttachThreadInput(my_tid, fg_tid, False)
 
     def reassert_topmost(self):
-        """Keep the strip above the taskbar. Only re-orders when actually covered
-        (avoids needless z-order churn/flicker every tick). Coordinates are never
-        touched, so Qt keeps its own DPI-correct placement."""
+        """Keep the widget on top. Re-orders only when something actually covers it
+        (taskbar, Claude Code, any window) — no needless z-order churn otherwise.
+        Coordinates are never touched, so Qt keeps its own DPI-correct placement."""
         if sys.platform != "win32":
             return
         try:
-            if self._is_below_taskbar():
+            if self._is_covered():
                 self._force_top()
         except Exception as exc:  # never let a bad handle kill the timer
             log(f"reassert error: {exc!r}")
