@@ -18,7 +18,7 @@ config.json
 Screenshot*.png
 S__*.jpg
 S__*.jpeg
-ExCCStatus.png
+ExCCStatus*.png
 GithubLink.md
 
 # never commit credentials
